@@ -1,0 +1,181 @@
+class SATSolver:
+    def __init__(self, n):
+        self.n = n
+        self.variables = [f"p{i}{j}" for i in range(1, n + 2) for j in range(1, n + 1)]
+        self.clauses = self.generate_pigeonhole_instance()
+
+        # Initialize data structures for CDCL
+        self.assignment = {}
+        self.decision_stack = []
+        self.learned_clauses = []
+
+        # Initialize VSIDS scores for variables
+        self.vsids_scores = {var: 0 for var in self.variables}
+
+        # Additional data structure for proof generation
+        self.decision_proof = []
+
+    def generate_pigeonhole_instance(self):
+        clauses = []
+
+        # Each object is in a hole
+        for i in range(1, self.n + 2):
+            clause = [f"p{i}{j}" for j in range(1, self.n + 1)]
+            clauses.append(clause)
+
+        # Each hole contains only one object
+        for i in range(1, self.n + 1):
+            for j in range(i + 1, self.n + 2):
+                clause = [f"¬{var1} ¬{var2}" for var1 in self.variables if f"p{i}" in var1
+                          for var2 in self.variables if f"p{j}" in var2]
+                clauses.append(clause)
+
+        return clauses
+
+    def solve(self):
+        while True:
+            conflict = self.propagate()
+            if conflict is not None:
+                if not self.resolve_conflict(conflict):
+                    return False  # UNSAT
+            elif len(self.assignment) == len(self.variables):
+                return True  # SAT
+            else:
+                decision_variable = self.make_decision()
+                self.decision_stack.append(decision_variable)
+                self.assignment[decision_variable] = True  # Assign the variable to True
+
+                # Record the decision for proof generation
+                self.decision_proof.append(decision_variable)
+
+    def propagate(self):
+        while True:
+            unit_clause, conflict = self.find_unit_clause()
+            if conflict:
+                return conflict  # Found conflict during propagation
+            elif unit_clause is not None:
+                # Assign the variable in the unit clause to True
+                variable = unit_clause[0]
+                self.assignment[variable] = True
+                self.vsids_scores[variable] += 1  # Increase the score for the assigned variable
+                self.decision_stack.append(variable)
+                # Remove watched literals associated with this variable
+                self.remove_watched_literals(variable)
+            else:
+                break  # No more unit clauses
+
+    def find_unit_clause(self):
+        for clause in self.clauses:
+            unassigned_literals = [lit for lit in clause if lit not in self.assignment and f"¬{lit}" not in self.assignment]
+            if len(unassigned_literals) == 1:
+                return unassigned_literals, None  # Found a unit clause
+            elif len(unassigned_literals) == 0:
+                return None, clause  # Conflict, all literals in the clause are assigned
+
+        return None, None  # No unit clause or conflict
+
+    def make_decision(self):
+        # Choose an unassigned variable based on the VSIDS heuristic
+        unassigned_variables = [var for var in self.variables if var not in self.assignment and f"¬{var}" not in self.assignment]
+        decision_variable = max(unassigned_variables, key=lambda var: self.vsids_scores.get(var, 0))
+        return decision_variable
+
+    def resolve_conflict(self, conflict):
+        learned_clause = self.analyze_conflict(conflict)
+
+        if learned_clause is None:
+            return False  # UNSAT
+
+        self.learned_clauses.append(learned_clause)
+
+        # Backtrack and update assignments
+        backjump_level = self.compute_backjump_level(learned_clause)
+        self.backtrack(backjump_level)
+
+        # Add the learned clause as a new watched clause
+        self.clauses.append(learned_clause)
+        self.update_watched_literals(learned_clause)
+
+        return True
+
+    def analyze_conflict(self, conflict):
+        analyzed_literals = set()
+        conflict_clause = set(conflict)
+
+        while len(conflict_clause) > 1:
+            highest_score_literal = max(conflict_clause, key=lambda lit: self.vsids_scores.get(lit, 0))
+            analyzed_literals.add(highest_score_literal)
+
+            # Perform resolution to simplify the conflict clause
+            resolvent = self.resolve_conflict_clause(conflict_clause, highest_score_literal)
+            if len(resolvent) == 1:
+                return list(analyzed_literals)  # Found 1UIP
+
+            conflict_clause = resolvent
+
+        return None  # UNSAT, no UIP found
+
+    def resolve_conflict_clause(self, conflict_clause, literal):
+        resolvent = set()
+
+        for clause in self.clauses:
+            if literal in clause and len(clause) > 1:
+                resolvent |= set(clause) - {literal}
+
+        return resolvent
+
+    def compute_backjump_level(self, learned_clause):
+        levels = set(self.decision_level(lit) for lit in learned_clause)
+        return max(levels) if levels else 0
+
+    def decision_level(self, literal):
+        return 0 if literal not in self.assignment else self.decision_stack.index(literal) + 1
+
+    def backtrack(self, level):
+        # Backtrack to the specified level and update assignments
+        while len(self.decision_stack) > level:
+            variable = self.decision_stack.pop()
+            del self.assignment[variable]
+
+    def update_watched_literals(self, learned_clause):
+        # Update watched literals for the newly learned clause
+        watched_literals = [learned_clause[0], learned_clause[1]]  # For simplicity, watch the first two literals
+        self.clauses[-1] = watched_literals + learned_clause[2:]
+
+    def remove_watched_literals(self, variable):
+        # Remove watched literals associated with the given variable
+        for i, clause in enumerate(self.clauses):
+            if variable in clause[:2]:
+                other_literal = clause[0] if clause[1] == variable else clause[1]
+                self.vsids_scores[other_literal] += 1  # Increase the score for the other watched literal
+                new_watched_literals = [lit for lit in clause[2:] if lit not in self.assignment and f"¬{lit}" not in self.assignment]
+                self.clauses[i] = [other_literal, new_watched_literals[0]] + new_watched_literals[1:]
+
+    def generate_proof(self):
+        # Generate a proof based on the recorded decisions and propagations
+        proof = []
+        for decision in self.decision_proof:
+            proof.append(f"Decision: {decision}")
+            propagated_literals = self.propagate()
+            if propagated_literals:
+                proof.append(f"Conflict: {propagated_literals}")
+                return proof  # Return the proof up to the conflict
+
+        return proof  # Full proof if the solver was successful
+
+
+# Example usage
+n = 3
+solver = SATSolver(n)
+result = solver.solve()
+
+if result:
+    print("Satisfiable")
+    print("Model:", solver.assignment)
+    proof = solver.generate_proof()
+    print("Proof:")
+    for step in proof:
+        print(step)
+else:
+    print("Unsatisfiable")
+    # You might want to print the learned clauses or the conflict
